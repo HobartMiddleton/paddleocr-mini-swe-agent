@@ -1,0 +1,129 @@
+name: PaddleOCR PR Tests
+
+on:
+  push:
+    branches: ["main", "release/*"]
+  pull_request:
+    branches: ["main", "release/*"]
+
+permissions:
+  contents: read
+
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Detect docs-only changes
+        id: detect
+        uses: ./.github/actions/detect-docs-only
+
+  test-pr-python:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.result == 'success' && needs.detect-changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.8", "3.9", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test runner and base dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          fi
+      - name: Install PaddlePaddle CPU package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.python-version }}" = "3.8" ]; then
+            PADDLEPADDLE_VERSION="3.0.0"
+          else
+            PADDLEPADDLE_VERSION="3.1.0"
+          fi
+          python -m pip install "paddlepaddle==${PADDLEPADDLE_VERSION}" \
+            -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+      - name: Install matching PaddleX and project extras
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! PADDLEX_RANGE="$(python - <<'PY'
+          import re
+          from pathlib import Path
+
+          pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(
+              r"paddlex(?:\[[^\]]*\])?\s*>=\s*([0-9]+(?:\.[0-9]+)+)\s*,\s*<\s*([0-9]+(?:\.[0-9]+)+)",
+              pyproject,
+          )
+          if match is None:
+              raise SystemExit(
+                  "Could not extract the PaddleX version range from pyproject.toml"
+              )
+          print(f"{match.group(1)} {match.group(2)}")
+          PY
+          )"; then
+            echo "::error::Unable to determine the required PaddleX version series"
+            exit 1
+          fi
+          read -r PADDLEX_MIN PADDLEX_MAX <<< "${PADDLEX_RANGE}"
+          PADDLEX_SERIES="$(printf '%s\n' "${PADDLEX_MIN}" | awk -F. '{print $1 "." $2}')"
+          python -m pip install "paddlex[ocr-core]>=${PADDLEX_MIN},<${PADDLEX_MAX}"
+          python -m pip install "git+https://github.com/PaddlePaddle/PaddleX.git@release/${PADDLEX_SERIES}"
+          if [ "${{ matrix.python-version }}" = "3.8" ]; then
+            python -m pip install -e ".[doc2md]"
+          else
+            python -m pip install -e ".[all]"
+          fi
+      - name: Verify PaddleX import
+        shell: bash
+        run: python -c "import paddlex"
+      - name: Run Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.python-version }}" = "3.8" ]; then
+            python -m pytest -m "not resource_intensive and not py38_incompatible" tests
+          else
+            python -m pytest tests
+          fi
+
+  test-pr:
+    name: test-pr
+    needs:
+      - detect-changes
+      - test-pr-python
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required test result
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.detect-changes.result }}" != "success" ]; then
+            echo "::error::detect-changes did not succeed (result: ${{ needs.detect-changes.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.detect-changes.outputs.docs_only }}" = "true" ]; then
+            echo "Docs-only change; Python tests are not required."
+            exit 0
+          fi
+          if [ "${{ needs.test-pr-python.result }}" != "success" ]; then
+            echo "::error::test-pr-python did not succeed (result: ${{ needs.test-pr-python.result }})"
+            exit 1
+          fi
+          echo "Python test matrix succeeded."
