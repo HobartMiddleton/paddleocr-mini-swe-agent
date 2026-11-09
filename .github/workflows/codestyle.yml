@@ -1,0 +1,36 @@
+name: PaddleOCR Code Style Check
+
+# NOTE: Job name `check-code-style` is the required status check context
+# configured in branch protection. Do not rename without updating settings.
+
+on:
+  pull_request: {}
+  push:
+    branches: ['main', 'release/*']
+
+
+jobs:
+  check-code-style:
+    name: check-code-style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect docs-only change
+        id: docs-only
+        uses: ./.github/actions/detect-docs-only
+      - name: Set up Python
+        if: steps.docs-only.outputs.docs_only != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install check dependencies
+        if: steps.docs-only.outputs.docs_only != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pre-commit
+      - name: Check code style
+        if: steps.docs-only.outputs.docs_only != 'true'
+        run: pre-commit run --all-files --show-diff-on-failure
