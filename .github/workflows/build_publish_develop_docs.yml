@@ -1,0 +1,67 @@
+name: Build/Publish Develop Docs
+on:
+  push:
+    branches:
+      - master
+      - main
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REF: ${{ github.ref_name }}
+      MKDOCS_GIT_COMMITTERS_APIKEY: ${{ github.token }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "mkdocs-material" \
+            "mike" \
+            "mkdocs-static-i18n" \
+            "mkdocs-git-revision-date-localized-plugin" \
+            "mkdocs-git-committers-plugin-2" \
+            "pymdown-extensions"
+
+      - name: Reject moving GitHub source links
+        run: |
+          python tools/check_docs_github_links.py \
+            --root docs \
+            --repo-slug PaddlePaddle/PaddleOCR \
+            --forbidden-ref main \
+            --forbidden-ref master
+
+      - name: Resolve GitHub source links and edit links
+        run: |
+          python tools/resolve_doc_github_refs.py \
+            --root docs \
+            --placeholder '{{PADDLEOCR_GITHUB_REF}}' \
+            --source-ref "$SOURCE_REF"
+          sed -i -E "s#^edit_uri:.*#edit_uri: edit/${SOURCE_REF}/docs/#" mkdocs.yml
+
+      - name: Fetch documentation publication branch
+        run: |
+          git fetch origin gh-pages:gh-pages
+
+      - name: Build and publish development documentation
+        run: |
+          mike deploy --push --update-aliases \
+            --config-file mkdocs-ci.yml \
+            "$SOURCE_REF" latest
